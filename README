@@ -1,0 +1,4 @@
+Package gw (ghost writer) makes it easy to write simple build systems
+and other programs that watch for filesystem changes.
+
+See http://godoc.org/github.com/rynlbrwn/gw
