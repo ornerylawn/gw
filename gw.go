@@ -12,13 +12,12 @@
 //   design/
 //     header.html
 //     footer.html
+//     _reset.scss
 //     base.scss
-//   build/
-//     <built website>
 //
 // To build the site we write a simple watch.go file at the root of
-// our tree and use package gw. We can ignore files that we don't want
-// to build:
+// our tree and use package gw (full example in example/watch.go). We
+// can ignore files that we don't want to build:
 //
 //   const buildDir = "build"
 //   gw.Ignore(`^` + buildDir + `.*$`)
