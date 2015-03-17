@@ -39,6 +39,8 @@ import (
 	"github.com/rynlbrwn/gw"
 )
 
+const defaultTitle = "Awesome Title"
+
 func main() {
 	const buildDir = "build"
 
@@ -49,9 +51,9 @@ func main() {
 	gw.Ignore(`^\..*$`)
 	gw.Ignore(`^.*` + string(filepath.Separator) + `\..*$`)
 
-	gw.Match(`^content/.*\.(jpe?g|png|gif)$`, func(path string, deleted bool) error {
+	gw.Match(`^content/.*\.(jpe?g|png|gif)$`, func(path string, state gw.FileState) error {
 		outPath := filepath.Join(buildDir, rest(path))
-		if deleted {
+		if state == gw.Deleted {
 			return os.Remove(outPath)
 		}
 		in, err := os.Open(path)
@@ -71,11 +73,11 @@ func main() {
 		return err
 	})
 
-	gw.Match(`^content/.*\.md$`, func(path string, deleted bool) error {
+	gw.Match(`^content/.*\.md$`, func(path string, state gw.FileState) error {
 		r := rest(path)
 		ext := filepath.Ext(r)
 		outPath := filepath.Join(buildDir, r[:len(r)-len(ext)]+".html")
-		if deleted {
+		if state == gw.Deleted {
 			return os.Remove(outPath)
 		}
 		files, err := filepath.Glob("design/*.html")
@@ -127,14 +129,14 @@ func main() {
 		return c.Run()
 	})
 
-	gw.Match(`^design/.*\.scss$`, func(path string, deleted bool) error {
+	gw.Match(`^design/.*\.scss$`, func(path string, state gw.FileState) error {
 		if filepath.Base(path)[0] == '_' {
 			return nil
 		}
 		r := rest(path)
 		ext := filepath.Ext(r)
 		outPath := filepath.Join(buildDir, "css", r[:len(r)-len(ext)]+".css")
-		if deleted {
+		if state == gw.Deleted {
 			return os.Remove(outPath)
 		}
 		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
@@ -146,15 +148,17 @@ func main() {
 		return c.Run()
 	})
 
-	gw.Match(`^design/.*\.html$`, func(path string, deleted bool) error {
-		return gw.Trigger(`content/.*\.md`, false)
+	gw.Match(`^design/.*\.html$`, func(path string, state gw.FileState) error {
+		gw.SetStates(`content/.*\.md`, gw.Changed)
+		return nil
 	})
 
 	if err := os.RemoveAll(buildDir); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	if err := gw.Trigger(`.*`, false); err != nil {
+	gw.SetStates(`.*`, gw.Changed)
+	if err := gw.Dispatch(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -182,5 +186,5 @@ func parseTitle(r io.Reader) (string, error) {
 			return matches[1], nil
 		}
 	}
-	return "Ryan Brown", s.Err()
+	return defaultTitle, s.Err()
 }

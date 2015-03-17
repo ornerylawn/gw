@@ -1,81 +1,53 @@
 // Package gw (ghost writer) makes it easy to write simple build
 // systems and other programs that watch for filesystem changes.
 //
-// For example, let's say that you want to build a static site with
-// markdown. Your directory structure looks like this:
+// Say that you want to build a static site. All you need to do is
+// register handlers for the file paths you care about:
 //
-//   content/
-//     index.md
-//     foo/
-//       bar.md
-//       baz.jpg
-//   design/
-//     header.html
-//     footer.html
-//     _reset.scss
-//     base.scss
+//   gw.Match(`^content/.*\.md$`, func(path string, state gw.FileState) error {
+//     if state == gw.Deleted {
+//       // delete corresponding .html file from build directory
+//       return nil
+//     }
+//     // convert markdown to html write it to build directory
+//   })
 //
-// To build the site we write a simple watch.go file at the root of
-// our tree and use package gw (full example in example/watch.go). We
-// can ignore files that we don't want to build:
+//   gw.Match(`^content/.*\.(jpe?g|png|gif)$`, func(path string, state gw.FileState) error {
+//     if state == gw.Deleted {
+//       // delete image from build directory
+//       return nil
+//     }
+//     // build final image and write it to the build directory
+//   })
+//
+// If a change in one file should cause another file to rebuild, just
+// mark the other file as needing to be rebuilt.
+//
+//   gw.Match(`^design/.*\.html$`, func(path string, state gw.FileState) error {
+//     gw.SetStates(`content/.*\.md`, gw.Changed)
+//     return nil
+//   })
+//
+// You can also specify which paths to ignore:
 //
 //   const buildDir = "build"
 //   gw.Ignore(`^` + buildDir + `.*$`)
 //   gw.Ignore(`^watch\.go$`)
-//   gw.Ignore(`^.*~$`)
-//   gw.Ignore(`^.*#$`)
-//   gw.Ignore(`^\..*$`)
-//   gw.Ignore(`^.*` + string(filepath.Separator) + `\..*$`)
+//   gw.Ignore(`^.*~$`) // emacs backup
+//   gw.Ignore(`^.*#$`) // emacs auto-save
 //
-// We'll need a rule for copying images to the build directory.
-//
-//   gw.Match(`^content/.*\.(jpe?g|png|gif)$`, func(path string, deleted bool) error {
-//     if deleted {
-//       // Delete corresponding file from build directory.
-//     } else {
-//       // Copy file at path to build directory
-//     }
-//   })
-//
-// And we'll need a rule for converting markdown files using our
-// header.html and footer.html templates.
-//
-//   gw.Match(`^content/.*\.md$`, func(path string, deleted bool) error {
-//     if deleted {
-//       // Delete corresponding .html file from build directory.
-//     } else {
-//       // Convert markdown to html and surround with header.html and
-//       // footer.html templates. Write output to build directory.
-//     }
-//   })
-//
-// But we want to make sure that all of the markdown files are rebuilt
-// if any of the template files is changed.
-//
-//   gw.Match(`^design/.*\.html$`, func(path string, deleted bool) error {
-//     return gw.Trigger(`content/.*\.md`, false)
-//   })
-//
-// Then we can clean the build directory and build the whole tree.
+// Then we can clean the build directory and watch for changes/deletes.
 //
 //   if err := os.RemoveAll(buildDir); err != nil {
-//     fmt.Println(err)
-//     os.Exit(1)
+//     log.Fatal(err)
 //   }
-//   if err := gw.Trigger(`.*`, false); err != nil {
-//     fmt.Println(err)
-//     os.Exit(1)
-//   }
-//
-// Finally, we can watch for changes and automatically trigger rules
-// for files that change.
-//
+//   gw.SetStates(`.*`, gw.Changed)
 //   if err := gw.Watch(); err != nil {
-//     fmt.Println(err)
-//     os.Exit(1)
+//     log.Fatal(err)
 //   }
 //
-// Run the new build system with:
+// If you put all of this in `watch.go` at the root of the tree, you
+// can now build the site with:
 //
 //   go run watch.go
 //
@@ -86,37 +58,67 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	fsnotify "gopkg.in/fsnotify.v1"
 )
 
-type buildFunc func(string, bool) error
+type FileState int
+
+const (
+	Clean FileState = iota
+	Changed
+	Deleted
+)
+
+type Handler func(string, FileState) error
+
+// Log is called for every state change. By default, it prints the
+// event to os.Stdout.
+var Log = logEvent
 
 type matcher struct {
 	pattern *regexp.Regexp
-	f       buildFunc
+	f       Handler
 }
 
 var (
 	matchers = []*matcher{}
 	ignores  = []*regexp.Regexp{}
+
+	states = map[string]FileState{}
 )
 
-// Match registers a func to be called whenever a file matching a
+// Match registers a handler to be called whenever a file matching a
 // pattern is changed or deleted.
-func Match(pattern string, f func(path string, deleted bool) error) {
-	matchers = append(matchers, &matcher{regexp.MustCompile(pattern), buildFunc(f)})
+func Match(pattern string, f Handler) {
+	matchers = append(matchers, &matcher{regexp.MustCompile(pattern), f})
 }
 
-// Ignore specifies files that should not cause registered funcs to be
-// called.
+// Ignore specifies files that should never be matched.
 func Ignore(pattern string) {
 	ignores = append(ignores, regexp.MustCompile(pattern))
 }
 
-// Trigger calls the registered funcs for any files that match a
-// pattern. The deleted bool is passed to the registered funcs.
-func Trigger(pattern string, deleted bool) error {
+// SetState marks a path as having a certain state, overriding the
+// current state. If state is Clean, it will prevent handlers from
+// being called on the next Dispatch, otherwise it will cause handlers
+// to be called on the next Dispatch.
+func SetState(path string, state FileState) {
+	if !hasMatcher(path) {
+		return
+	}
+	if state == Clean {
+		delete(states, path)
+	} else {
+		states[path] = state
+	}
+	Log(path, state)
+}
+
+// SetStates calls SetState with the given state on each path that
+// matches the pattern.
+func SetStates(pattern string, state FileState) error {
 	r, err := regexp.Compile(pattern)
 	if err != nil {
 		return err
@@ -125,23 +127,35 @@ func Trigger(pattern string, deleted bool) error {
 		if err != nil {
 			return err
 		}
-		if !r.MatchString(path) || shouldIgnore(path) {
+		if !r.MatchString(path) || hasIgnore(path) {
 			return nil
 		}
-		m := findMatcher(path)
-		if m == nil {
-			return nil
-		}
-		fmt.Printf("triggering %s\n", path)
-		if err := m.f(path, deleted); err != nil {
-			return err
-		}
+		SetState(path, state)
 		return nil
 	})
 }
 
+// Dispatch calls registered handlers for each path marked as Changed
+// or Deleted.
+func Dispatch() error {
+	for {
+		path, state, ok := nextDirty()
+		if !ok {
+			return nil
+		}
+		SetState(path, Clean)
+		for _, m := range matchers {
+			if m.pattern.MatchString(path) {
+				if err := m.f(path, state); err != nil {
+					return err
+				}
+			}
+		}
+	}
+}
+
 // Watch listens for file change/deletion events and calls the
-// corresponding registered funcs.
+// corresponding handlers.
 func Watch() error {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -155,26 +169,29 @@ func Watch() error {
 	go func() {
 		for {
 			select {
+			case <-time.After(250 * time.Millisecond):
+				Dispatch()
 			case e := <-w.Events:
-				if shouldIgnore(e.Name) {
+				if hasIgnore(e.Name) {
 					continue
 				}
 				if e.Op&fsnotify.Create != 0 {
 					info, err := os.Stat(e.Name)
 					if err != nil {
-						fmt.Println(err)
-						continue
+						errCh <- err
+						break
 					}
 					if info.IsDir() {
 						if err = watchRecursive(w, e.Name); err != nil {
-							fmt.Println(err)
-							continue
+							errCh <- err
+							break
 						}
 					}
 				}
-				pattern := `^` + e.Name + `$`
-				if err := Trigger(pattern, e.Op&fsnotify.Remove != 0); err != nil {
-					fmt.Println(err)
+				if e.Op&fsnotify.Remove != 0 {
+					SetState(e.Name, Deleted)
+				} else {
+					SetState(e.Name, Changed)
 				}
 			case err := <-w.Errors:
 				errCh <- err
@@ -190,28 +207,48 @@ func watchRecursive(w *fsnotify.Watcher, dir string) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() || shouldIgnore(path) {
+		if !info.IsDir() || hasIgnore(path) {
 			return nil
 		}
-		fmt.Printf("watching %s...\n", path)
+		SetState(path, Clean)
 		return w.Add(path)
 	})
 }
 
-func findMatcher(path string) *matcher {
+func hasMatcher(path string) bool {
 	for _, m := range matchers {
 		if m.pattern.MatchString(path) {
-			return m
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
-func shouldIgnore(path string) bool {
+func hasIgnore(path string) bool {
 	for _, v := range ignores {
 		if v.MatchString(path) {
 			return true
 		}
 	}
 	return false
+}
+
+func nextDirty() (path string, state FileState, ok bool) {
+	for k, v := range states {
+		return k, v, true
+	}
+	return "", Clean, false
+}
+
+func logEvent(path string, state FileState) {
+	var s string
+	switch state {
+	case Clean:
+		s = "clean"
+	case Changed:
+		s = "changed"
+	case Deleted:
+		s = "deleted"
+	}
+	fmt.Println(s, path)
 }
