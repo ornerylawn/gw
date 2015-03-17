@@ -165,41 +165,34 @@ func Watch() error {
 	if err = watchRecursive(w, "."); err != nil {
 		return err
 	}
-	errCh := make(chan error)
-	go func() {
-		for {
-			select {
-			case <-time.After(250 * time.Millisecond):
-				Dispatch()
-			case e := <-w.Events:
-				if hasIgnore(e.Name) {
-					continue
-				}
-				if e.Op&fsnotify.Create != 0 {
-					info, err := os.Stat(e.Name)
-					if err != nil {
-						errCh <- err
-						break
-					}
-					if info.IsDir() {
-						if err = watchRecursive(w, e.Name); err != nil {
-							errCh <- err
-							break
-						}
-					}
-				}
-				if e.Op&fsnotify.Remove != 0 {
-					SetState(e.Name, Deleted)
-				} else {
-					SetState(e.Name, Changed)
-				}
-			case err := <-w.Errors:
-				errCh <- err
-				break
+	for {
+		select {
+		case <-time.After(250 * time.Millisecond):
+			Dispatch()
+		case e := <-w.Events:
+			if hasIgnore(e.Name) {
+				continue
 			}
+			if e.Op&fsnotify.Create != 0 {
+				info, err := os.Stat(e.Name)
+				if err != nil {
+					return err
+				}
+				if info.IsDir() {
+					if err = watchRecursive(w, e.Name); err != nil {
+						return err
+					}
+				}
+			}
+			if e.Op&fsnotify.Remove != 0 {
+				SetState(e.Name, Deleted)
+			} else {
+				SetState(e.Name, Changed)
+			}
+		case err := <-w.Errors:
+			return err
 		}
-	}()
-	return <-errCh
+	}
 }
 
 func watchRecursive(w *fsnotify.Watcher, dir string) error {
